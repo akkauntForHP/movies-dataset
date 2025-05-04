@@ -1,0 +1,990 @@
+import streamlit as st
+import pandas as pd
+import altair as alt
+import sqlite3
+import hashlib
+import re
+from datetime import datetime, timedelta
+import secrets
+import io
+import csv
+
+# Set page config
+st.set_page_config(page_title="Adolatli Auksion uz", page_icon="⚖️", layout="wide")
+
+# Custom CSS for modern, light design
+st.markdown("""
+<style>
+    body {
+        font-family: 'Inter', sans-serif;
+        background: #FFFFFF;
+    }
+    .stApp {
+        max-width: 1400px;
+        margin: 0 auto;
+        background: #F8FAFC;
+    }
+    h1, h2 {
+        font-family: 'Poppins', sans-serif;
+        color: #1E40AF;
+    }
+    h3 {
+        font-family: 'Poppins', sans-serif;
+        color: #1E40AF;
+        font-weight: 500;
+    }
+    p, li {
+        font-family: 'Inter', sans-serif;
+        color: #1F2937;
+    }
+    .header {
+        background: linear-gradient(90deg, #1E40AF, #60A5FA);
+        padding: 2rem;
+        color: white;
+        border-radius: 12px;
+        text-align: center;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    .nav-container {
+        background: #FFFFFF;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+        display: flex;
+        justify-content: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    .card {
+        background: white;
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+    .card:hover {
+        transform: translateY(-8px);
+        box-shadow: 0 8px 16px rgba(0,0,0,0.15);
+    }
+    .stButton>button {
+        border-radius: 8px;
+        background-color: #3B82F6;
+        color: white;
+        font-family: 'Poppins', sans-serif;
+        padding: 0.5rem 1.5rem;
+        transition: background-color 0.2s ease;
+    }
+    .stButton>button:hover {
+        background-color: #2563EB;
+    }
+    .stTextInput>div>input, .stSelectbox>div>select {
+        border-radius: 8px;
+        border: 1px solid #D1D5DB;
+        padding: 0.75rem;
+        font-family: 'Inter', sans-serif;
+        transition: border-color 0.2s ease;
+    }
+    .stTextInput>div>input:focus, .stSelectbox>div>select:focus {
+        border-color: #3B82F6;
+    }
+    .metric-card {
+        background: white;
+        border-radius: 12px;
+        padding: 1rem;
+        text-align: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+    }
+    .footer {
+        text-align: center;
+        color: #6B7280;
+        padding: 2rem;
+        margin-top: 3rem;
+        border-top: 1px solid #E5E7EB;
+        font-family: 'Inter', sans-serif;
+    }
+    .filter-container {
+        background: #FFFFFF;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        margin-bottom: 1rem;
+        display: flex;
+        justify-content: center;
+        gap: 1rem;
+        flex-wrap: wrap;
+    }
+    @media (max-width: 768px) {
+        .nav-container, .filter-container {
+            flex-direction: column;
+            align-items: center;
+        }
+        .stButton>button {
+            width: 100%;
+        }
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Database functions
+def init_db():
+    conn = sqlite3.connect('auction.db')
+    c = conn.cursor()
+    c.execute("DROP TABLE IF EXISTS users")
+    c.execute('''
+    CREATE TABLE users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL,
+        full_name TEXT,
+        email TEXT,
+        phone TEXT,
+        passport TEXT,
+        role TEXT DEFAULT 'user',
+        verified BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_login TIMESTAMP,
+        is_spammer BOOLEAN DEFAULT FALSE,
+        spam_block_until TIMESTAMP
+    )
+    ''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS tokens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        token TEXT NOT NULL,
+        expires_at TIMESTAMP NOT NULL
+    )
+    ''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS firms (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        address TEXT,
+        phone TEXT,
+        region TEXT,
+        rating TEXT,
+        total_revenue INTEGER DEFAULT 0
+    )
+    ''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS auctions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        description TEXT,
+        amount INTEGER,
+        duration TEXT,
+        start_time TIMESTAMP,
+        image_url TEXT,
+        firm_id INTEGER,
+        rating TEXT,
+        status TEXT DEFAULT 'Active',
+        FOREIGN KEY (firm_id) REFERENCES firms(id)
+    )
+    ''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS comments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        auction_id INTEGER,
+        user_id INTEGER,
+        comment TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (auction_id) REFERENCES auctions(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    ''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS cards (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        card_number TEXT NOT NULL,
+        expiry_date TEXT,
+        cvv TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    ''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        auction_id INTEGER,
+        firm_id INTEGER,
+        message TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (auction_id) REFERENCES auctions(id),
+        FOREIGN KEY (firm_id) REFERENCES firms(id)
+    )
+    ''')
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS ratings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        auction_id INTEGER,
+        user_id INTEGER,
+        rating TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (auction_id) REFERENCES auctions(id),
+        FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    ''')
+    hashed_password = hashlib.sha256('admin123'.encode()).hexdigest()
+    c.execute(
+        "INSERT OR REPLACE INTO users (username, password, role, verified, is_spammer, spam_block_until) VALUES (?, ?, ?, ?, ?, ?)",
+        ('admin', hashed_password, 'admin', True, False, None)
+    )
+    conn.commit()
+    conn.close()
+
+def get_db_connection():
+    conn = sqlite3.connect('auction.db')
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def create_user(username, password, full_name='', email='', phone=''):
+    if not re.match(r'^[A-Za-z\d@$!%*#?&]{4}$', password):
+        return False, "Parol kamida 4 belgi, harf, raqamni o‘z ichiga olishi kerak!"
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        try:
+            c.execute(
+                "INSERT INTO users (username, password, full_name, email, phone, is_spammer, spam_block_until) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (username, hashed_password, full_name, email, phone, False, None)
+            )
+            conn.commit()
+            return True, "Muvaffaqiyatli ro‘yxatdan o‘tdingiz!"
+        except sqlite3.IntegrityError:
+            return False, "Bu foydalanuvchi nomi allaqachon mavjud!"
+
+def verify_user(username, password):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        c.execute(
+            "SELECT * FROM users WHERE username = ? AND password = ?",
+            (username, hashed_password)
+        )
+        return c.fetchone()
+
+def generate_remember_token(username):
+    token = secrets.token_hex(32)
+    expires_at = datetime.now() + timedelta(days=7)
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM tokens WHERE username = ?", (username,))
+        c.execute(
+            "INSERT INTO tokens (username, token, expires_at) VALUES (?, ?, ?)",
+            (username, token, expires_at)
+        )
+        conn.commit()
+    return token
+
+def verify_remember_token(token):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT username FROM tokens WHERE token = ? AND expires_at > CURRENT_TIMESTAMP",
+            (token,)
+        )
+        result = c.fetchone()
+        return result['username'] if result else None
+
+def verify_user_account(user_id, passport):
+    if not re.match(r'^[A-Z]{2}\d{7}$', passport):
+        return False
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE users SET verified = TRUE, passport = ? WHERE id = ?",
+            (passport, user_id)
+        )
+        conn.commit()
+    return True
+
+def add_card(user_id, card_number, expiry_date, cvv=''):
+    if not re.match(r'^\d{4}\s\d{4}\s\d{4}\s\d{4}$', card_number):
+        return False
+    if not re.match(r'^\d{2}/\d{2}$', expiry_date):
+        return False
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        hashed_card = hashlib.sha256(card_number.encode()).hexdigest()
+        c.execute(
+            "INSERT INTO cards (user_id, card_number, expiry_date, cvv) VALUES (?, ?, ?, ?)",
+            (user_id, hashed_card, expiry_date, cvv)
+        )
+        conn.commit()
+    return True
+
+def save_rating(auction_id, user_id, rating):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO ratings (auction_id, user_id, rating) VALUES (?, ?, ?)",
+            (auction_id, user_id, rating)
+        )
+        conn.commit()
+        c.execute(
+            "SELECT COUNT(*) as count FROM ratings WHERE user_id = ? AND created_at > ? AND rating = 'Suspicious'",
+            (user_id, datetime.now() - timedelta(minutes=1))
+        )
+        count = c.fetchone()['count']
+        if count >= 5:
+            c.execute(
+                "UPDATE users SET is_spammer = TRUE, spam_block_until = ? WHERE id = ?",
+                (datetime.now() + timedelta(hours=24), user_id)
+            )
+            conn.commit()
+
+def add_comment(auction_id, user_id, comment):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT COUNT(*) as count FROM comments WHERE user_id = ? AND created_at > ?",
+            (user_id, datetime.now() - timedelta(minutes=1))
+        )
+        count = c.fetchone()['count']
+        if count >= 3:
+            c.execute(
+                "UPDATE users SET is_spammer = TRUE, spam_block_until = ? WHERE id = ?",
+                (datetime.now() + timedelta(hours=24), user_id)
+            )
+            conn.commit()
+            return False
+        c.execute(
+            "INSERT INTO comments (auction_id, user_id, comment) VALUES (?, ?, ?)",
+            (auction_id, user_id, comment)
+        )
+        conn.commit()
+    return True
+
+def delete_comment(comment_id):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("DELETE FROM comments WHERE id = ?", (comment_id,))
+        conn.commit()
+
+def get_comments(auction_id):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT c.*, u.username FROM comments c JOIN users u ON c.user_id = u.id WHERE auction_id = ?", (auction_id,))
+        return c.fetchall()
+
+def block_user(user_id, block_until):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE users SET is_spammer = TRUE, spam_block_until = ? WHERE id = ?",
+            (block_until, user_id)
+        )
+        conn.commit()
+
+def update_auction_status(auction_id, status):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE auctions SET status = ? WHERE id = ?",
+            (status, auction_id)
+        )
+        conn.commit()
+
+def analyze_risk(auction, firm, comments):
+    score = 0
+    reasons = []
+    duration_hours = float(auction['duration'].split()[0]) if 'soat' in auction['duration'] else float(auction['duration'].split()[0]) * 24
+    if duration_hours < 24:
+        score += 50
+        reasons.append("Qisqa muddat: Auksion 24 soatdan kam davom etadi")
+    if len(comments) > 5:
+        score += 30
+        reasons.append(f"Ko‘p shikoyatlar: {len(comments)} ta")
+    if firm['rating'] == 'Suspicious':
+        score += 20
+        reasons.append("Firma shubhali deb baholangan")
+    if auction['amount'] > 5000000000:
+        score += 20
+        reasons.append("Juda katta summa: 5 milliard UZS dan yuqori")
+    negative_words = ['korruptsiya', 'firibgar', 'aldash', 'noqonuniy']
+    negative_count = sum(comment['comment'].lower().count(word) for comment in comments for word in negative_words)
+    if negative_count > 0:
+        score += 10 * negative_count
+        reasons.append(f"Shikoyatlarda salbiy so‘zlar: {negative_count} ta")
+    return reasons if score >= 50 else []
+
+def send_notification(auction_id, firm_id, message):
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO notifications (auction_id, firm_id, message) VALUES (?, ?, ?)",
+            (auction_id, firm_id, message)
+        )
+        conn.commit()
+
+# Initialize database
+init_db()
+
+# Sample data
+regions = [
+    "Andijon", "Buxoro", "Farg‘ona", "Jizzax", "Xorazm", "Namangan", "Navoiy",
+    "Qashqadaryo", "Qoraqalpog‘iston", "Samarqand", "Sirdaryo", "Surxondaryo", "Toshkent"
+]
+firms_data = [
+    {"id": 1, "name": "Toshkent Mebel", "address": "Chilanzar, Toshkent", "phone": "+998901234567", "region": "Toshkent", "rating": "Fair", "total_revenue": 450000000},
+    {"id": 2, "name": "Samarqand Yollari", "address": "Registan, Samarqand", "phone": "+998902345678", "region": "Samarqand", "rating": "Suspicious", "total_revenue": 2000000000},
+    {"id": 3, "name": "Farg‘ona Agro", "address": "Marg‘ilon, Farg‘ona", "phone": "+998903456789", "region": "Farg‘ona", "rating": "Fair", "total_revenue": 800000000},
+]
+auctions_data = [
+    {"id": 1, "title": "Maktab mebellari", "description": "12 ta maktab uchun stol va stullar.", "amount": 450000000, "duration": "3 kun", "start_time": "2025-05-01 10:00:00", "image_url": "https://via.placeholder.com/300x200?text=Mebel", "firm_id": 1, "rating": None, "status": "Active"},
+    {"id": 2, "title": "Yo‘l rekonstruktsiyasi", "description": "5 km shahar yo‘lini rekonstruktsiya qilish.", "amount": 2000000000, "duration": "2 soat", "start_time": "2025-05-01 12:00:00", "image_url": "https://via.placeholder.com/300x200?text=Yo‘l", "firm_id": 2, "rating": None, "status": "Active"},
+    {"id": 3, "title": "Qishloq xo‘jaligi texnikasi", "description": "10 ta traktor va 5 ta kombayn.", "amount": 1200000000, "duration": "5 kun", "start_time": "2025-05-02 09:00:00", "image_url": "https://via.placeholder.com/300x200?text=Traktor", "firm_id": 3, "rating": None, "status": "Active"},
+]
+df_firms = pd.DataFrame(firms_data)
+df = pd.DataFrame(auctions_data)
+# Session state
+if 'authenticated' not in st.session_state:
+    st.session_state.authenticated = False
+if 'user' not in st.session_state:
+    st.session_state.user = None
+if 'filtered_auctions' not in st.session_state:
+    st.session_state.filtered_auctions = df
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = "Home"
+
+
+# Check token
+def check_token():
+    if not st.session_state.authenticated and 'auction_token' in st.session_state:
+        username = verify_remember_token(st.session_state.auction_token)
+        if username:
+            user = verify_user(username, '')
+            if user and not (
+                    user['is_spammer'] and user['spam_block_until'] and user['spam_block_until'] > datetime.now()):
+                st.session_state.authenticated = True
+                st.session_state.user = user
+                return True
+    return False
+
+
+def login(username, password, remember_me):
+    user = verify_user(username, password)
+    if not user:
+        st.error("Foydalanuvchi nomi yoki parol noto‘g‘ri!")
+        return False
+    if user['is_spammer'] and user['spam_block_until'] and user['spam_block_until'] > datetime.now():
+        st.error("Sizning hisobingiz vaqtincha bloklangan. Keyinroq urinib ko‘ring.")
+        return False
+    st.session_state.authenticated = True
+    st.session_state.user = user
+    if remember_me:
+        token = generate_remember_token(username)
+        st.session_state.auction_token = token
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute(
+            "UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE username = ?",
+            (username,)
+        )
+        conn.commit()
+    return True
+
+
+def logout():
+    st.session_state.authenticated = False
+    st.session_state.user = None
+    if 'auction_token' in st.session_state:
+        del st.session_state.auction_token
+    st.rerun()
+
+
+def switch_page(page):
+    st.session_state.current_page = page
+
+
+# Check token
+check_token()
+
+# Main app
+if not st.session_state.authenticated:
+    if st.session_state.current_page == "Home":
+        st.markdown("""
+        <div class="header">
+            <h1>Adolatli Auksion uz</h1>
+            <p>O‘zbekistonda shaffof auksionlar va korruptsiyaga qarshi kurash platformasi</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.markdown('<div class="nav-container">', unsafe_allow_html=True)
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("🏠 Bosh sahifa", key="nav_home"):
+                switch_page("Home")
+        with col2:
+            if st.button("🔐 Kirish", key="nav_login"):
+                switch_page("Login")
+        with col3:
+            if st.button("📝 Ro‘yxatdan o‘tish", key="nav_register"):
+                switch_page("Register")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.subheader("Joriy auksionlar")
+        for idx, auction in df.iterrows():
+            firm = df_firms[df_firms['id'] == auction['firm_id']].iloc[0]
+            with st.container():
+                st.markdown(f"""
+                <div class="card">
+                    <img src="{auction['image_url']}" style="width:100%; max-height:200px; object-fit:cover; border-radius:8px;">
+                    <h3>{auction['title']}</h3>
+                    <p><strong>Tavsif:</strong> {auction['description']}</p>
+                    <p><strong>Narx:</strong> {auction['amount']:,} UZS</p>
+                    <p><strong>Firma:</strong> {firm['name']} ({firm['region']})</p>
+                    <p><strong>Muddat:</strong> {auction['duration']}</p>
+                    <p><strong>Status:</strong> {auction['status']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.subheader("Auksion nima?")
+        st.markdown("""
+        Auksion - bu mahsulotlar yoki xizmatlarni eng yuqori narx taklif qilgan ishtirokchiga sotish jarayoni. Bizning platformamiz shaffoflikni ta‘minlaydi va korruptsiyani oldini oladi.
+        """)
+
+        st.subheader("Biz bilan bog‘lanish")
+        st.markdown("""
+        - **Telegram**: @AdolatliAuksion
+        - **Instagram**: @AdolatliAuksionUZ
+        - **Email**: support@adolatliauksion.uz
+        - **Telefon**: +998 71 200 12 34
+        """)
+
+    elif st.session_state.current_page == "Login":
+        st.markdown("""
+        <div class="header">
+            <h1>Kirish</h1>
+            <p>Platformaga kirish uchun ma‘lumotlaringizni kiriting</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("login_form"):
+            username = st.text_input("Foydalanuvchi nomi")
+            password = st.text_input("Parol", type="password")
+            remember_me = st.checkbox("Meni eslab qol (7 kun)")
+            submitted = st.form_submit_button("Kirish")
+            if submitted:
+                if login(username, password, remember_me):
+                    st.success("Muvaffaqiyatli kirdingiz!")
+                    st.rerun()
+
+        if st.button("Orqaga", key="back_login"):
+            switch_page("Home")
+
+    elif st.session_state.current_page == "Register":
+        st.markdown("""
+        <div class="header">
+            <h1>Ro‘yxatdan o‘tish</h1>
+            <p>Yangi hisob ochish uchun ma‘lumotlarni to‘ldiring</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("register_form"):
+            username = st.text_input("Foydalanuvchi nomi")
+            password = st.text_input("Parol", type="password")
+            confirm_password = st.text_input("Parolni tasdiqlang", type="password")
+            full_name = st.text_input("To‘liq ismingiz")
+            email = st.text_input("Email")
+            phone = st.text_input("Telefon raqami (+998901234567)")
+            submitted = st.form_submit_button("Ro‘yxatdan o‘tish")
+            if submitted:
+                if not username or not password:
+                    st.error("Foydalanuvchi nomi va parol talab qilinadi!")
+                elif password != confirm_password:
+                    st.error("Parollar bir xil emas!")
+                else:
+                    success, message = create_user(username, password, full_name, email, phone)
+                    if success:
+                        st.success(message)
+                        login(username, password, False)
+                        st.rerun()
+                    else:
+                        st.error(message)
+
+        if st.button("Orqaga", key="back_register"):
+            switch_page("Home")
+
+else:
+    if st.session_state.user['is_spammer'] and st.session_state.user['spam_block_until'] and st.session_state.user[
+        'spam_block_until'] > datetime.now():
+        st.error("Sizning hisobingiz vaqtincha bloklangan. Keyinroq urinib ko‘ring.")
+        if st.button("Chiqish", key="logout_blocked"):
+            logout()
+    else:
+        st.markdown(f"""
+        <div class="header">
+            <h1>Adolatli Auksion uz</h1>
+            <p>Xush kelibsiz, <strong>{st.session_state.user['username']}</strong>! | 
+            <a href="#" onclick="document.getElementById('logout').click()" style="color: white;">Chiqish</a></p>
+            <p>Shaffof auksionlar va korruptsiyaga qarshi kurash</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if st.button("Chiqish", key="logout"):
+            logout()
+
+        # Navigation
+        st.markdown('<div class="nav-container">', unsafe_allow_html=True)
+        cols = st.columns(6 if st.session_state.user['role'] == 'admin' else 5)
+        with cols[0]:
+            if st.button("🏠 Bosh sahifa", key="nav_home_auth"):
+                switch_page("Home")
+        with cols[1]:
+            if st.button("📋 Auksionlar", key="nav_auctions"):
+                switch_page("Auctions")
+        with cols[2]:
+            if st.button("🏢 Firmalar", key="nav_firms"):
+                switch_page("Firms")
+        with cols[3]:
+            if st.button("📊 Tahlil", key="nav_analysis"):
+                switch_page("Analysis")
+        with cols[4]:
+            if st.button("🔍 Verifikatsiya", key="nav_verification"):
+                switch_page("Verification")
+        if st.session_state.user['role'] == 'admin':
+            with cols[5]:
+                if st.button("🛠 Admin paneli", key="nav_admin"):
+                    switch_page("Admin")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        # Enhanced Filters
+        st.markdown('<div class="filter-container">', unsafe_allow_html=True)
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            selected_region = st.selectbox("Viloyat", [""] + regions, key="region_filter")
+        with col2:
+            search_term = st.text_input("Qidiruv", placeholder="Mahsulot nomi...")
+        with col3:
+            min_price = st.number_input("Minimal narx", min_value=0, value=0)
+        with col4:
+            status = st.selectbox("Status", ["", "Active", "Closed"], key="status_filter")
+        with col5:
+            rating = st.selectbox("Reyting", ["", "Fair", "Suspicious"], key="rating_filter")
+        st.session_state.filtered_auctions = df
+        if selected_region:
+            st.session_state.filtered_auctions = st.session_state.filtered_auctions[
+                st.session_state.filtered_auctions['firm_id'].isin(
+                    df_firms[df_firms['region'] == selected_region]['id']
+                )]
+        if search_term:
+            st.session_state.filtered_auctions = st.session_state.filtered_auctions[
+                st.session_state.filtered_auctions['title'].str.contains(search_term, case=False, na=False) |
+                st.session_state.filtered_auctions['description'].str.contains(search_term, case=False, na=False)
+                ]
+        if min_price:
+            st.session_state.filtered_auctions = st.session_state.filtered_auctions[
+                st.session_state.filtered_auctions['amount'] >= min_price
+                ]
+        if status:
+            st.session_state.filtered_auctions = st.session_state.filtered_auctions[
+                st.session_state.filtered_auctions['status'] == status
+                ]
+        if rating:
+            st.session_state.filtered_auctions = st.session_state.filtered_auctions[
+                st.session_state.filtered_auctions['rating'] == rating
+                ]
+        st.markdown('</div>', unsafe_allow_html=True)
+        # Home page (authenticated)
+        if st.session_state.current_page == "Home":
+            st.subheader("Joriy auksionlar")
+            for idx, auction in st.session_state.filtered_auctions.iterrows():
+                firm = df_firms[df_firms['id'] == auction['firm_id']].iloc[0]
+                with st.container():
+                    st.markdown(f"""
+                    <div class="card">
+                        <img src="{auction['image_url']}" style="width:100%; max-height:200px; object-fit:cover; border-radius:8px;">
+                        <h3>{auction['title']}</h3>
+                        <p><strong>Tavsif:</strong> {auction['description']}</p>
+                        <p><strong>Narx:</strong> {auction['amount']:,} UZS</p>
+                        <p><strong>Firma:</strong> {firm['name']} ({firm['region']})</p>
+                        <p><strong>Muddat:</strong> {auction['duration']}</p>
+                        <p><strong>Status:</strong> {auction['status']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # Auctions page
+        elif st.session_state.current_page == "Auctions":
+            st.subheader("Auksionlar")
+            for idx, auction in st.session_state.filtered_auctions.iterrows():
+                firm = df_firms[df_firms['id'] == auction['firm_id']].iloc[0]
+                with st.container():
+                    st.markdown(f"""
+                    <div class="card">
+                        <img src="{auction['image_url']}" style="width:100%; max-height:200px; object-fit:cover; border-radius:8px;">
+                        <h3>{auction['title']}</h3>
+                        <p><strong>Tavsif:</strong> {auction['description']}</p>
+                        <p><strong>Narx:</strong> {auction['amount']:,} UZS</p>
+                        <p><strong>Firma:</strong> {firm['name']} ({firm['region']})</p>
+                        <p><strong>Telefon:</strong> {firm['phone']}</p>
+                        <p><strong>Muddat:</strong> {auction['duration']}</p>
+                        <p><strong>Status:</strong> {auction['status']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        if st.session_state.user['verified'] and auction['status'] == 'Active':
+                            bid = st.number_input("Narx taklif qiling (UZS)", min_value=auction['amount'],
+                                                  key=f"bid_{idx}")
+                            if st.button("Taklif qilish", key=f"bid_submit_{idx}"):
+                                st.success("Taklif qabul qilindi (simulyatsiya)!")
+                        else:
+                            st.warning("Auksionda qatnashish uchun verifikatsiyadan o‘ting yoki auksion faol emas.")
+                    with col2:
+                        if st.session_state.user['verified']:
+                            fair_btn = st.button("Adolatli", key=f"fair_{idx}")
+                            suspicious_btn = st.button("Shubhali", key=f"suspicious_{idx}")
+                            if fair_btn:
+                                save_rating(auction['id'], st.session_state.user['id'], "Fair")
+                                st.rerun()
+                            if suspicious_btn:
+                                save_rating(auction['id'], st.session_state.user['id'], "Suspicious")
+                                st.rerun()
+                        else:
+                            st.warning("Baho berish uchun verifikatsiyadan o‘ting.")
+                    with col3:
+                        with st.expander("Shikoyat yozish"):
+                            comment = st.text_area("Izoh", key=f"comment_{idx}")
+                            if st.button("Yuborish", key=f"comment_submit_{idx}"):
+                                if add_comment(auction['id'], st.session_state.user['id'], comment):
+                                    st.success("Shikoyat yuborildi!")
+                                else:
+                                    st.error("Shikoyat yuborishda cheklov: qisqa vaqt ichida juda ko‘p shikoyat!")
+
+                    with st.expander("Shikoyatlarni ko‘rish"):
+                        comments = get_comments(auction['id'])
+                        if comments:
+                            for comment in comments:
+                                st.markdown(
+                                    f"**{comment['username']}**: {comment['comment']} ({comment['created_at']})")
+                        else:
+                            st.write("Hali shikoyatlar yo‘q.")
+
+        # Firms page
+        elif st.session_state.current_page == "Firms":
+            st.subheader("Yuridik firmalar")
+            for idx, firm in df_firms.iterrows():
+                with st.container():
+                    st.markdown(f"""
+                    <div class="card">
+                        <h3>{firm['name']}</h3>
+                        <p><strong>Manzil:</strong> {firm['address']}</p>
+                        <p><strong>Telefon:</strong> {firm['phone']}</p>
+                        <p><strong>Viloyat:</strong> {firm['region']}</p>
+                        <p><strong>Reyting:</strong> {firm['rating']}</p>
+                        <p><strong>Jami daromad:</strong> {firm['total_revenue']:,} UZS</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+        # Analysis page
+        elif st.session_state.current_page == "Analysis":
+            st.subheader("Tahlil")
+            with get_db_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT rating, COUNT(*) as count FROM ratings GROUP BY rating")
+                rating_counts = c.fetchall()
+            if not rating_counts:
+                st.warning("Hali baholar yo‘q.")
+            else:
+                rating_df = pd.DataFrame(rating_counts, columns=['Rating', 'Count'])
+                chart = alt.Chart(rating_df).mark_bar().encode(
+                    x=alt.X('Rating:N', title='Reyting'),
+                    y=alt.Y('Count:Q', title='Soni'),
+                    color=alt.Color('Rating:N', scale=alt.Scale(
+                        domain=['Fair', 'Suspicious'],
+                        range=['#10B981', '#DC2626']
+                    ))
+                ).properties(height=300)
+                st.altair_chart(chart, use_container_width=True)
+
+                pie_chart = alt.Chart(rating_df).mark_arc().encode(
+                    theta=alt.Theta(field="Count", type="quantitative"),
+                    color=alt.Color(field="Rating", type="nominal", scale=alt.Scale(
+                        domain=['Fair', 'Suspicious'],
+                        range=['#10B981', '#DC2626']
+                    ))
+                ).properties(height=300)
+                st.altair_chart(pie_chart, use_container_width=True)
+
+        # Verification page
+        elif st.session_state.current_page == "Verification":
+            st.subheader("Verifikatsiyadan o‘tish")
+            if not st.session_state.user['verified']:
+                with st.form("verify_form"):
+                    passport = st.text_input("Pasport ma‘lumotlari (AA1234567)")
+                    submitted = st.form_submit_button("Tasdiqlash")
+                    if submitted:
+                        if verify_user_account(st.session_state.user['id'], passport):
+                            st.success("Profilingiz tasdiqlandi!")
+                            st.rerun()
+                        else:
+                            st.error("Pasport formati noto‘g‘ri! (2 harf + 7 raqam)")
+
+            st.subheader("Plastik karta qo‘shish")
+            with st.form("card_form"):
+                card_number = st.text_input("Karta raqami (XXXX XXXX XXXX XXXX)")
+                expiry_date = st.text_input("Amal qilish muddati (XX/YY)")
+                cvv = st.text_input("CVV (ixtiyoriy)", type="password")
+                submitted = st.form_submit_button("Qo‘shish")
+                if submitted:
+                    if add_card(st.session_state.user['id'], card_number, expiry_date, cvv):
+                        st.success("Karta qo‘shildi!")
+                    else:
+                        st.error("Karta ma‘lumotlari formati noto‘g‘ri!")
+
+        # Admin panel
+        elif st.session_state.current_page == "Admin" and st.session_state.user['role'] == 'admin':
+            st.subheader("Admin paneli")
+
+            st.subheader("Foydalanuvchilar")
+            with get_db_connection() as conn:
+                c = conn.cursor()
+                c.execute("SELECT * FROM users")
+                users = c.fetchall()
+            for user in users:
+                with st.container():
+                    st.markdown(f"""
+                    <div class="card">
+                        <h3>{user['username']}</h3>
+                        <p><strong>Ism:</strong> {user['full_name'] if user['full_name'] else 'N/A'}</p>
+                        <p><strong>Email:</strong> {user['email'] if user['email'] else 'N/A'}</p>
+                        <p><strong>Telefon:</strong> {user['phone'] if user['phone'] else 'N/A'}</p>
+                        <p><strong>Pasport:</strong> {user['passport'] if user['passport'] else 'N/A'}</p>
+                        <p><strong>Ro‘yxatdan o‘tgan:</strong> {user['created_at']}</p>
+                        <p><strong>Oxirgi kirish:</strong> {user['last_login'] if user['last_login'] else 'N/A'}</p>
+                        <p><strong>Spam holati:</strong> {'Bloklangan' if user['is_spammer'] else 'Faol'}</p>
+                        <p><strong>Blok vaqti:</strong> {user['spam_block_until'] if user['spam_block_until'] else 'Yo‘q'}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if user['role'] != 'admin':
+                        block_days = st.number_input(f"{user['username']} uchun bloklash (kun)", min_value=0,
+                                                     max_value=30, key=f"block_{user['id']}")
+                        if st.button(f"{user['username']} ni bloklash", key=f"block_submit_{user['id']}"):
+                            if block_days > 0:
+                                block_user(user['id'], datetime.now() + timedelta(days=block_days))
+                                st.success(f"{user['username']} {block_days} kunga bloklandi!")
+                            else:
+                                block_user(user['id'], None)
+                                st.success(f"{user['username']} blokdan chiqarildi!")
+
+            st.subheader("Auksionlar")
+            for idx, auction in df.iterrows():
+                with st.container():
+                    st.markdown(f"""
+                    <div class="card">
+                        <h3>{auction['title']}</h3>
+                        <p><strong>Tavsif:</strong> {auction['description']}</p>
+                        <p><strong>Narx:</strong> {auction['amount']:,} UZS</p>
+                        <p><strong>Muddat:</strong> {auction['duration']}</p>
+                        <p><strong>Status:</strong> {auction['status']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    status = st.selectbox("Statusni o‘zgartirish", ["Active", "Closed"], key=f"status_{auction['id']}")
+                    if st.button("O‘zgartirish", key=f"status_submit_{auction['id']}"):
+                        update_auction_status(auction['id'], status)
+                        st.success(f"Auksion statusi '{status}' ga o‘zgartirildi!")
+                        st.rerun()
+
+            st.subheader("Shikoyatlar")
+            with get_db_connection() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT c.*, u.username, a.title FROM comments c JOIN users u ON c.user_id = u.id JOIN auctions a ON c.auction_id = a.id")
+                comments = c.fetchall()
+            for comment in comments:
+                with st.container():
+                    st.markdown(f"""
+                    <div class="card">
+                        <p><strong>Foydalanuvchi:</strong> {comment['username']}</p>
+                        <p><strong>Auksion:</strong> {comment['title']}</p>
+                        <p><strong>Izoh:</strong> {comment['comment']}</p>
+                        <p><strong>Vaqt:</strong> {comment['created_at']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if st.button("Shikoyatni o‘chirish", key=f"delete_comment_{comment['id']}"):
+                        delete_comment(comment['id'])
+                        st.success("Shikoyat o‘chirildi!")
+                        st.rerun()
+
+            st.subheader("AI xavf xabarlari")
+            with get_db_connection() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "SELECT n.*, a.title, f.name FROM notifications n JOIN auctions a ON n.auction_id = a.id JOIN firms f ON n.firm_id = f.id")
+                notifications = c.fetchall()
+            for notif in notifications:
+                st.markdown(f"""
+                <div class="card">
+                    <p><strong>Auksion:</strong> {notif['title']}</p>
+                    <p><strong>Firma:</strong> {notif['name']}</p>
+                    <p><strong>Xabar:</strong> {notif['message']}</p>
+                    <p><strong>Vaqt:</strong> {notif['created_at']}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+            st.subheader("Ma’lumotlarni eksport qilish")
+            export_type = st.selectbox("Eksport turi",
+                                       ["Foydalanuvchilar", "Auksionlar", "Shikoyatlar", "Xavf xabarlari"])
+            if st.button("CSV sifatida yuklab olish"):
+                with get_db_connection() as conn:
+                    c = conn.cursor()
+                    if export_type == "Foydalanuvchilar":
+                        c.execute(
+                            "SELECT id, username, full_name, email, phone, passport, role, verified, created_at, last_login, is_spammer, spam_block_until FROM users")
+                        data = c.fetchall()
+                        df_export = pd.DataFrame(data,
+                                                 columns=['ID', 'Username', 'Full Name', 'Email', 'Phone', 'Passport',
+                                                          'Role', 'Verified', 'Created At', 'Last Login', 'Is Spammer',
+                                                          'Spam Block Until'])
+                    elif export_type == "Auksionlar":
+                        c.execute("SELECT a.*, f.name as firm_name FROM auctions a JOIN firms f ON a.firm_id = f.id")
+                        data = c.fetchall()
+                        df_export = pd.DataFrame(data, columns=['ID', 'Title', 'Description', 'Amount', 'Duration',
+                                                                'Start Time', 'Image URL', 'Firm ID', 'Rating',
+                                                                'Status', 'Firm Name'])
+                    elif export_type == "Shikoyatlar":
+                        c.execute(
+                            "SELECT c.*, u.username, a.title FROM comments c JOIN users u ON c.user_id = u.id JOIN auctions a ON c.auction_id = a.id")
+                        data = c.fetchall()
+                        df_export = pd.DataFrame(data, columns=['ID', 'Auction ID', 'User ID', 'Comment', 'Created At',
+                                                                'Username', 'Auction Title'])
+                    else:  # Xavf xabarlari
+                        c.execute(
+                            "SELECT n.*, a.title, f.name FROM notifications n JOIN auctions a ON n.auction_id = a.id JOIN firms f ON n.firm_id = f.id")
+                        data = c.fetchall()
+                        df_export = pd.DataFrame(data, columns=['ID', 'Auction ID', 'Firm ID', 'Message', 'Created At',
+                                                                'Auction Title', 'Firm Name'])
+                output = io.StringIO()
+                df_export.to_csv(output, index=False, quoting=csv.QUOTE_NONNUMERIC)
+                st.download_button(
+                    label="CSV yuklab olish",
+                    data=output.getvalue(),
+                    file_name=f"{export_type.lower().replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+
+# Footer
+st.markdown("""
+<div class="footer">
+    <p>Adolatli Auksion uz | Korruptsiyaga qarshi kurash platformasi</p>
+    <p>2025, O‘zbekiston | <a href="mailto:support@adolatliauksion.uz">support@adolatliauksion.uz</a></p>
+</div>
+""", unsafe_allow_html=True)
+
+# AI Risk Analysis
+for idx, auction in df.iterrows():
+    firm = df_firms[df_firms['id'] == auction['firm_id']].iloc[0]
+    with get_db_connection() as conn:
+        c = conn.cursor()
+        c.execute("SELECT * FROM comments WHERE auction_id = ?", (auction['id'],))
+        comments = c.fetchall()
+    reasons = analyze_risk(auction, firm, comments)
+    if reasons:
+        message = f"Auksion: {auction['title']}\nFirma: {firm['name']}\nSabablar: {'; '.join(reasons)}"
+        send_notification(auction['id'], firm['id'], message)
